@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>30-Day King's Challenge Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .nav-btn { white-space: nowrap; }
+  </style>
+</head>
+<body class="bg-gray-900">
+  <div id="app-container"><!-- Rendered by JS --></div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot, collection, query, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // Logging
+    setLogLevel('debug');
+
+    // --- CRITICAL FIX: USE CANVAS GLOBAL VARIABLES FOR FIREBASE CONFIG ---
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const sanitizedAppId = appId.replace(/[/.]/g, '-');
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+    // App constants
+    const CHALLENGE_START_DATE = new Date('2025-11-01T00:00:00');
+    const ARCHETYPES = [
+      { key: 'king',    title: 'King',    prompt: 'Today I sharpened my masculine King by...' },
+      { key: 'priest',  title: 'Priest',  prompt: 'Today I practiced my masculine Priest by...' },
+      { key: 'poet',    title: 'Poet',    prompt: 'Today I showed my masculine Poet by...' },
+      { key: 'jester',  title: 'Jester',  prompt: 'Today I fed my masculine Jester by...' },
+      { key: 'warrior', title: 'Warrior', prompt: 'Today I trained my masculine Warrior by...' }
+    ];
+
+    function getCurrentChallengeDay() {
+      const s = new Date(CHALLENGE_START_DATE), t = new Date();
+      s.setHours(0,0,0,0); t.setHours(0,0,0,0);
+      const day = Math.ceil((t - s) / 86400000) + 1;
+      return Math.min(Math.max(1, day), 30);
+    }
+
+    const state = {
+      logs: [],
+      currentChallengeDay: getCurrentChallengeDay(),
+      currentScreen: 'challenge',
+      isLoading: true,
+      error: null,
+      db: null,
+      auth: null,
+      userId: null
+    };
+
+    // ---------- UI helpers ----------
+    const fmtDate = d => d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
+    const navBtn = (text,screen,active)=>`<button onclick="window.changeScreen('${screen}')" class="nav-btn px-3 py-1 text-sm sm:px-4 sm:py-2 rounded-lg font-medium transition-colors ${active?'bg-indigo-600 text-white':'bg-gray-700 text-indigo-300 hover:bg-indigo-500 hover:text-white'}">${text}</button>`;
+
+    function renderCard(a, log, day){
+      const logged = !!log, cls = logged?'bg-green-900/40 border-green-600/50':'bg-gray-800 border-indigo-500/50';
+      if (logged) return `
+        <div class="mb-6 p-6 rounded-xl shadow-lg border-2 ${cls}">
+          <h3 class="text-2xl font-black text-green-300 mb-2">${a.title}<span class="text-sm text-green-400 ml-2">(Logged)</span></h3>
+          <p class="text-gray-300 italic mb-4">${a.prompt}</p>
+          <div class="p-4 bg-green-900/50 rounded-lg border border-green-700/50"><p class="text-gray-200">${log.entry}</p></div>
+        </div>`;
+      if (day>30) return '';
+      return `
+        <div class="mb-6 p-6 rounded-xl shadow-lg border ${cls}">
+          <h3 class="text-2xl font-black text-white mb-2">${a.title}</h3>
+          <p class="text-indigo-300 italic mb-4">${a.prompt}</p>
+          <form class="log-archetype-form" data-archetype="${a.key}">
+            <div class="mb-4">
+              <textarea name="entry" rows="4" required minlength="10" placeholder="Detail your action and insight..." class="w-full p-3 bg-gray-900 border border-gray-700 rounded-lg text-white focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+            </div>
+            <button class="w-full py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors shadow-md">Commit ${a.title} Entry</button>
+          </form>
+        </div>`;
+    }
+
+    function renderChallenge(){
+      const day = state.currentChallengeDay;
+      const daily = state.logs.filter(l=>l.day===day);
+      const done = new Set(daily.map(l=>l.archetype)).size===ARCHETYPES.length;
+      let content = `
+        <div class="text-center p-4 mb-8 bg-gray-800 rounded-xl shadow-lg border-b border-indigo-500/50">
+          <h2 class="text-3xl font-extrabold text-white mb-2">Day ${day} of 30</h2>
+          <p class="text-indigo-300">${fmtDate(new Date())}</p>
+        </div>`;
+      if (done) content += `
+        <div class="text-center p-6 bg-green-900/50 rounded-xl border border-green-600/50 shadow-lg mb-8">
+          <h2 class="text-xl font-bold text-green-300 mb-2">Day ${day} Completed!</h2>
+          <p class="text-gray-300">All five archetypes logged. Great work.</p>
+          <button onclick="window.changeScreen('history')" class="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-md">Review Entries</button>
+        </div>`;
+      content += ARCHETYPES.map(a=>renderCard(a, daily.find(l=>l.archetype===a.key), day)).join('');
+      return `${content}
+        <div class="mt-8 pt-6 border-t border-gray-700/50">
+          <p class="text-sm text-gray-400 italic">Your user ID (for collaboration): <span class="font-mono text-xs text-indigo-400">${state.userId??'—'}</span></p>
+        </div>`;
+    }
+
+    function renderHistory(){
+      const logs=[...state.logs].sort((a,b)=>(b.day-a.day)||a.title.localeCompare(b.title));
+      let cur=null, out='';
+      logs.forEach(log=>{
+        if(log.day!==cur){ if(cur!==null) out+='</div>'; cur=log.day;
+          out+=`<div class="mt-8 mb-4 border-b border-indigo-500/50 pb-2"><h2 class="text-2xl font-extrabold text-indigo-400">Day ${log.day}</h2><p class="text-sm text-gray-400">${fmtDate(new Date(log.date))}</p></div><div class="space-y-4">`;
+        }
+        const prompt=ARCHETYPES.find(a=>a.key===log.archetype)?.prompt||'';
+        out+=`<div class="bg-gray-800 p-4 rounded-xl shadow-md border-l-4 border-white/80"><h3 class="text-xl font-bold text-white mb-1">${log.title}</h3><p class="text-gray-400 italic mb-3 text-sm">${prompt}</p><p class="text-gray-200">${log.entry}</p></div>`;
+      });
+      if(cur!==null) out+='</div>';
+      return `<h2 class="text-3xl font-extrabold text-white mb-6">Challenge History (${state.logs.length} entries)</h2>${state.logs.length?out:'<p class="text-gray-500 text-center py-12">No entries yet. Start Day 1!</p>'}`;
+    }
+
+    function renderStats(){
+      const stats = (()=> {
+        const total=state.logs.length;
+        const counts=state.logs.reduce((a,l)=>(a[l.archetype]=(a[l.archetype]||0)+1,a),{});
+        const byDay=state.logs.reduce((a,l)=>((a[l.day]??=new Set()).add(l.archetype),a),{});
+        let full=0; const lim=Math.min(state.currentChallengeDay,30);
+        for(let d=1; d<=lim; d++) if(byDay[d]?.size===ARCHETYPES.length) full++;
+        const max=ARCHETYPES.length*lim;
+        const rate=max?((total/max)*100).toFixed(1):0;
+        return {totalEntries:total, archetypeCounts:counts, daysFullyCompleted:full, overallCompletionRate:rate};
+      })();
+      const bars=ARCHETYPES.map(a=>{
+        const c=stats.archetypeCounts[a.key]||0;
+        const p=stats.totalEntries?((c/stats.totalEntries)*100).toFixed(1):0;
+        return `<div class="mb-4"><div class="flex justify-between text-sm text-gray-300"><span class="font-semibold">${a.title} (${c})</span><span>${p}%</span></div><div class="w-full bg-gray-700 rounded-full h-2.5 mt-1"><div class="bg-indigo-500 h-2.5 rounded-full" style="width:${p}%"></div></div></div>`;
+      }).join('');
+      return `
+        <h2 class="text-3xl font-extrabold text-white mb-6">Challenge Statistics</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-8">
+          <div class="bg-gray-800 p-6 rounded-xl shadow-lg border border-indigo-700/50 text-center"><p class="text-5xl font-extrabold text-indigo-400">${stats.totalEntries}</p><p class="text-gray-300 mt-2">Total Logs</p></div>
+          <div class="bg-gray-800 p-6 rounded-xl shadow-lg border border-indigo-700/50 text-center"><p class="text-5xl font-extrabold text-indigo-400">${stats.daysFullyCompleted}</p><p class="text-gray-300 mt-2">Days 5/5</p></div>
+          <div class="bg-gray-800 p-6 rounded-xl shadow-lg border border-indigo-700/50 text-center"><p class="text-5xl font-extrabold text-indigo-400">${stats.overallCompletionRate}%</p><p class="text-gray-300 mt-2">Overall Rate</p></div>
+        </div>
+        <div class="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700"><h3 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Archetype Breakdown</h3>${bars}</div>`;
+    }
+
+    function render(){
+      const el=document.getElementById('app-container');
+      
+      if(state.isLoading){
+        el.innerHTML=`<div class="min-h-screen flex items-center justify-center bg-gray-900 text-white"><div class="text-center"><svg class="animate-spin h-8 w-8 text-indigo-400 mx-auto" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><p class="mt-4 text-gray-400">Loading your challenge data...</p></div></div>`;
+      } else {
+          const nav=`<div class="fixed top-0 left-0 right-0 z-10 bg-gray-800 shadow-xl border-b border-indigo-500/50"><div class="max-w-4xl mx-auto flex justify-between items-center p-3 sm:p-4"><h1 class="text-2xl font-black text-indigo-400">King's Challenge</h1><nav class="flex space-x-2 sm:space-x-4">${navBtn('Challenge','challenge',state.currentScreen==='challenge')}${navBtn('History','history',state.currentScreen==='history')}${navBtn('Stats','stats',state.currentScreen==='stats')}</nav></div></div>`;
+          const body = state.currentScreen==='challenge' ? renderChallenge() : state.currentScreen==='history' ? renderHistory() : renderStats();
+          el.innerHTML = `<div class="min-h-screen bg-gray-900 text-white pt-16 sm:pt-20">${nav}<div class="max-w-4xl mx-auto p-4 sm:p-6 pb-20">${body}</div>${state.error?`<div class="fixed bottom-4 inset-x-0 mx-auto max-w-md p-3 bg-red-900/40 border border-red-600 rounded-lg text-sm text-red-100">${state.error}</div>`:''}</div>`;
+          document.querySelectorAll('.log-archetype-form').forEach(f=>f.addEventListener('submit',handleSubmit));
+      }
+    }
+
+    async function handleSubmit(e){
+      e.preventDefault();
+      const form=e.target, archetypeKey=form.getAttribute('data-archetype'), entry=form.elements.entry.value.trim();
+      if(!entry){ state.error="Please write your daily entry."; render(); return; }
+      const a=ARCHETYPES.find(x=>x.key===archetypeKey); const now=new Date(); const day=state.currentChallengeDay;
+      const data={day, date:now.toISOString().slice(0,10), timestamp:now.getTime(), archetype:a.key, title:a.title, entry};
+      const id=`day-${day}-${archetypeKey}`;
+      try{ await setDoc(doc(state.db,'artifacts',sanitizedAppId,'users',state.userId,'challenge_logs',id), data); state.error=null; }
+      catch(err){ state.error=`Failed to save ${archetypeKey}: ${err.message}`; }
+      render();
+    }
+
+    window.changeScreen = s => { state.currentScreen=s; render(); };
+
+    // Init Firebase + Auth + listener
+    let app, db, auth;
+    try{
+      app = initializeApp(firebaseConfig);
+      db  = getFirestore(app);
+      auth= getAuth(app);
+      onAuthStateChanged(auth, async (user)=>{
+        if(!user){ 
+            if (initialAuthToken) {
+                await signInWithCustomToken(auth, initialAuthToken);
+            } else {
+                await signInAnonymously(auth);
+            }
+        }
+        state.userId = auth.currentUser?.uid || crypto.randomUUID();
+        state.db = db; state.auth = auth;
+        
+        const logsRef = collection(db,'artifacts',sanitizedAppId,'users',state.userId,'challenge_logs');
+        
+        onSnapshot(query(logsRef), snap=>{
+          state.logs = []; snap.forEach(d=>state.logs.push(d.data()));
+          state.isLoading=false; state.currentChallengeDay=getCurrentChallengeDay(); render();
+        }, err=>{ state.isLoading=false; state.error=`Data sync failed: ${err.message}`; render(); });
+      });
+    }catch(e){
+      document.getElementById('app-container').innerHTML = `<div class="p-6 text-red-600 bg-red-100 rounded-lg shadow-lg max-w-xl mx-auto mt-12"><h2 class="font-bold text-xl mb-2">Setup Error</h2><p>Failed to initialize Firebase. Please ensure the global configuration variables are available.</p><p class="text-sm mt-2">Error: ${e.message}</p></div>`;
+    }
+
+    document.addEventListener('DOMContentLoaded', render);
+  </script>
+</body>
+</html>
